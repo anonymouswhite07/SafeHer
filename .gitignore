@@ -1,0 +1,32 @@
+# ── Dependencies ───────────────────────────────────────
+node_modules/
+.pnp
+.pnp.js
+
+# ── Expo / React Native ───────────────────────────────
+.expo/
+dist/
+web-build/
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.orig.*
+
+# ── Environment / Secrets ─────────────────────────────
+.env
+.env.local
+.env.production
+.env*.local
+
+# ── Build outputs ─────────────────────────────────────
+android/
+ios/
+
+# ── OS / Editor ───────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/
