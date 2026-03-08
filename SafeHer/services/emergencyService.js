@@ -38,7 +38,7 @@ import { isInternetAvailable } from '@/services/networkService';
  *
  * Find your LAN IP on Windows: run `ipconfig` and look for IPv4 Address
  */
-const BACKEND_URL = 'http://192.168.1.100:3000';
+const BACKEND_URL = 'https://safeher-c7ad.onrender.com';
 
 const ESCALATION_TIMEOUT_MS = 60_000;   // 60s before first escalation
 const MAX_ESCALATIONS = 3;
