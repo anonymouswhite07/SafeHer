@@ -1,52 +1,61 @@
 /**
  * SafeHer — services/trackingService.js
  *
- * Manages the live location tracking session during an emergency.
+ * Persistent live location tracking during emergencies.
  *
- * Flow:
- *   startTracking(lat, lng)        → creates backend session, returns link
- *   _pushLocationLoop()            → sends GPS updates every 5 seconds
- *   stopTracking()                 → clears the update interval
- *   getTrackingLink()              → returns the current guardian link (or null)
+ * Strategy (two-layer approach):
+ *   PRIMARY: Location.watchPositionAsync  — fires on every movement (event-driven)
+ *            This is how real tracking apps work. No polling gaps.
+ *   FALLBACK: 10-second heartbeat        — keeps backend alive when user is stationary
+ *             Ensures the guardian page doesn't show stale data if user hasn't moved.
  *
- * The backend stores locations in-memory and serves a live HTML page
- * at https://safeher-c7ad.onrender.com/track/<id> for guardians.
+ * Lifecycle:
+ *   startTracking(lat, lng)  → creates backend session, begins watching
+ *   stopTracking()           → removes watcher + clears heartbeat
+ *   getTrackingLink()        → returns the guardian URL
  */
 
-import { getCurrentLocation } from '@/services/locationService';
+import * as Location from 'expo-location';
 
 const BACKEND_URL = 'https://safeher-c7ad.onrender.com';
-const UPDATE_INTERVAL = 3000;   // push new GPS every 3 seconds
+const HEARTBEAT_MS = 10_000;  // push at least every 10s even when stationary
+const DISTANCE_METERS = 1;       // fire watcher on any movement ≥ 1 metre
 
-// ─── Module state ─────────────────────────────────────────────────────────────
+// ── Module state ──────────────────────────────────────────────────────────────
 
 let _trackingId = null;
 let _trackingLink = null;
-let _intervalId = null;
 let _isActive = false;
+let _watchSubscription = null;   // expo-location subscription object
+let _heartbeatTimer = null;   // interval for stationary keep-alive
+let _lastLat = null;
+let _lastLng = null;
 
-// ─── Public API ───────────────────────────────────────────────────────────────
+// ── Public API ────────────────────────────────────────────────────────────────
 
 /**
- * Create a tracking session on the backend and begin sending location updates.
+ * Create a backend session and begin live tracking.
  *
  * @param {number} lat   Initial latitude
  * @param {number} lng   Initial longitude
- * @returns {Promise<{ trackingId: string, link: string }>}
+ * @returns {Promise<{ trackingId: string|null, link: string|null }>}
  */
 export async function startTracking(lat, lng) {
     if (_isActive) {
-        console.warn('[tracking] Already active — returning existing link.');
+        console.warn('[tracking] Already active — returning existing session.');
         return { trackingId: _trackingId, link: _trackingLink };
     }
 
+    _lastLat = lat;
+    _lastLng = lng;
+
+    // ── Step 1: Register session on backend ────────────────────────────────
     try {
         const res = await fetch(`${BACKEND_URL}/start-tracking`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ lat, lng }),
         });
-
         if (!res.ok) throw new Error(`Server responded ${res.status}`);
 
         const data = await res.json();
@@ -54,79 +63,88 @@ export async function startTracking(lat, lng) {
         _trackingLink = data.link;
         _isActive = true;
 
-        console.info(`[tracking] ✅ Session created: ${_trackingId}`);
-        console.info(`[tracking] 🔗 Link: ${_trackingLink}`);
-
-        // Begin continuous updates
-        _startLocationLoop();
-
-        return { trackingId: _trackingId, link: _trackingLink };
+        console.info(`[tracking] ✅ Session: ${_trackingId}`);
+        console.info(`[tracking] 🔗 ${_trackingLink}`);
     } catch (err) {
-        console.warn('[tracking] Could not start session:', err.message);
+        console.warn('[tracking] Could not create backend session:', err.message);
         return { trackingId: null, link: null };
     }
+
+    // ── Step 2: watchPositionAsync — primary event-driven updates ──────────
+    try {
+        _watchSubscription = await Location.watchPositionAsync(
+            {
+                accuracy: Location.Accuracy.BestForNavigation,
+                distanceInterval: DISTANCE_METERS,   // fire on ≥ 1m movement
+                timeInterval: 3000,              // also fire at least every 3s
+            },
+            (location) => {
+                const { latitude, longitude } = location.coords;
+                _lastLat = latitude;
+                _lastLng = longitude;
+                _pushUpdate(latitude, longitude);
+            }
+        );
+        console.info('[tracking] watchPositionAsync started.');
+    } catch (err) {
+        console.warn('[tracking] watchPositionAsync failed, heartbeat-only mode:', err.message);
+    }
+
+    // ── Step 3: Heartbeat — keeps session alive when stationary ───────────
+    _heartbeatTimer = setInterval(async () => {
+        if (!_isActive || _lastLat === null) return;
+        // Only push if watcher isn't firing (i.e. user is stationary)
+        // Watcher already calls _pushUpdate, so this is just a keep-alive.
+        await _pushUpdate(_lastLat, _lastLng);
+    }, HEARTBEAT_MS);
+
+    return { trackingId: _trackingId, link: _trackingLink };
 }
 
 /**
- * Stop sending location updates and clear the session.
+ * Stop all tracking — removes the location watcher and heartbeat timer.
  */
 export function stopTracking() {
-    if (_intervalId) {
-        clearInterval(_intervalId);
-        _intervalId = null;
-    }
     _isActive = false;
+
+    if (_watchSubscription) {
+        _watchSubscription.remove();
+        _watchSubscription = null;
+        console.info('[tracking] Location watcher removed.');
+    }
+
+    if (_heartbeatTimer) {
+        clearInterval(_heartbeatTimer);
+        _heartbeatTimer = null;
+        console.info('[tracking] Heartbeat cleared.');
+    }
+
     _trackingId = null;
     _trackingLink = null;
+    _lastLat = null;
+    _lastLng = null;
+
     console.info('[tracking] Tracking stopped.');
 }
 
-/**
- * Return the active tracking link (for embedding in SMS).
- * @returns {string|null}
- */
-export function getTrackingLink() {
-    return _trackingLink;
-}
+/** @returns {string|null} */
+export function getTrackingLink() { return _trackingLink; }
 
-/**
- * @returns {boolean}
- */
-export function isTrackingActive() {
-    return _isActive;
-}
+/** @returns {boolean} */
+export function isTrackingActive() { return _isActive; }
 
-// ─── Internal: location polling loop ─────────────────────────────────────────
-
-function _startLocationLoop() {
-    if (_intervalId) clearInterval(_intervalId);
-
-    _intervalId = setInterval(async () => {
-        if (!_isActive || !_trackingId) {
-            clearInterval(_intervalId);
-            return;
-        }
-
-        try {
-            const loc = await getCurrentLocation();
-            await _pushUpdate(loc.latitude, loc.longitude);
-        } catch (err) {
-            console.warn('[tracking] Location poll failed:', err.message);
-        }
-    }, UPDATE_INTERVAL);
-}
+// ── Internal ──────────────────────────────────────────────────────────────────
 
 async function _pushUpdate(lat, lng) {
+    if (!_trackingId) return;
     try {
-        const res = await fetch(`${BACKEND_URL}/update-location`, {
+        await fetch(`${BACKEND_URL}/update-location`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ id: _trackingId, lat, lng }),
         });
-        if (res.ok) {
-            console.info(`[tracking] 📍 Location updated: ${lat.toFixed(4)}, ${lng.toFixed(4)}`);
-        }
+        console.info(`[tracking] 📍 ${lat.toFixed(5)}, ${lng.toFixed(5)}`);
     } catch (err) {
-        console.warn('[tracking] Update push failed:', err.message);
+        console.warn('[tracking] Push failed:', err.message);
     }
 }
