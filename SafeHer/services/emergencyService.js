@@ -26,6 +26,7 @@ import { getCurrentLocation } from '@/services/locationService';
 import { getContacts } from '@/services/contactService';
 import { startAudioRecording, stopRecording as stopEvidenceSession } from '@/services/evidenceService';
 import { isInternetAvailable } from '@/services/networkService';
+import { startTracking, stopTracking, getTrackingLink } from '@/services/trackingService';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -77,6 +78,18 @@ export async function triggerEmergency(options = {}) {
         locationResult = await getCurrentLocation();
         mapsLink = locationResult.mapsLink;
         console.info('[emergencyService] GPS:', mapsLink);
+
+        // ── Start live tracking session on the backend ─────────────────────
+        try {
+            const trackResult = await startTracking(locationResult.latitude, locationResult.longitude);
+            if (trackResult.link) {
+                mapsLink = trackResult.link;   // override static link with live tracking URL
+                console.info('[emergencyService] 🔗 Live tracking:', trackResult.link);
+            }
+        } catch (trackErr) {
+            console.warn('[emergencyService] Could not start tracking session:', trackErr.message);
+            // mapsLink stays as the static Google Maps URL
+        }
     } catch (err) {
         console.warn('[emergencyService] Location unavailable:', err.message);
     }
@@ -173,6 +186,9 @@ export async function resolveEmergency() {
         clearTimeout(_escalationTimer);
         _escalationTimer = null;
     }
+
+    // Stop live tracking updates
+    stopTracking();
 
     const session = await stopEvidenceSession();
     console.info('[emergencyService] Emergency resolved. Audio URI:', session?.audioUri ?? 'none');
