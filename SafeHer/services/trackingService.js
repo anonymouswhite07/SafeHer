@@ -16,7 +16,7 @@
 import { getCurrentLocation } from '@/services/locationService';
 
 const BACKEND_URL = 'https://safeher-c7ad.onrender.com';
-const UPDATE_INTERVAL = 5000;   // push new GPS every 5 seconds
+const UPDATE_INTERVAL = 3000;   // push new GPS every 3 seconds
 
 // ─── Module state ─────────────────────────────────────────────────────────────
 
