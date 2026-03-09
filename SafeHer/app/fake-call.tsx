@@ -15,6 +15,7 @@ import { IconSymbol } from '@/components/ui/icon-symbol';
 import { Colors } from '@/constants/theme';
 import { useSafeHer } from '@/context/SafeHerContext';
 import * as Haptics from 'expo-haptics';
+import { startAudioRecording, stopRecording } from '@/services/evidenceService';
 
 const { width } = Dimensions.get('window');
 
@@ -75,25 +76,38 @@ export default function FakeCallScreen() {
         };
     }, []);
 
-    const handleAnswer = () => {
+    const handleAnswer = async () => {
         Vibration.cancel();
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
         setPhase('active');
+
+        // Secretly start audio recording as evidence when the fake call is answered
+        try {
+            await startAudioRecording();
+        } catch (err) {
+            console.warn('[FakeCall] Could not start recording:', err);
+        }
+
         timerRef.current = setInterval(() => {
             setCallDuration(s => s + 1);
         }, 1000);
     };
 
-    const handleDecline = () => {
+    const handleDecline = async () => {
         Vibration.cancel();
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+        await stopRecording();
         router.back();
     };
 
-    const handleEndCall = () => {
+    const handleEndCall = async () => {
         if (timerRef.current) clearInterval(timerRef.current);
         Vibration.cancel();
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+
+        // Stop the secret background recording when the call ends
+        await stopRecording();
+
         setPhase('ended');
         setTimeout(() => router.back(), 1500);
     };

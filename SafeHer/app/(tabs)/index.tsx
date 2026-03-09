@@ -21,9 +21,9 @@ const { width } = Dimensions.get('window');
 
 const QUICK_ACTIONS = [
   { id: 'fake-call', icon: 'phone.fill', label: 'Fake Call', color: '#7C3AED', route: '/fake-call' as const },
-  { id: 'share', icon: 'location.fill', label: 'Share Location', color: '#0EA5E9', route: null },
+  { id: 'fake-shutdown', icon: 'power', label: 'Fake Shutdown', color: '#EF4444', route: '/fake-shutdown' as const },
   { id: 'trip', icon: 'map.fill', label: 'Safe Route', color: '#10B981', route: '/safe-route' as const },
-  { id: 'record', icon: 'mic.fill', label: 'Record', color: '#F59E0B', route: null },
+  { id: 'share', icon: 'location.fill', label: 'Share Location', color: '#0EA5E9', route: null },
 ];
 
 export default function HomeScreen() {
@@ -69,6 +69,8 @@ export default function HomeScreen() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     if (id === 'fake-call') {
       router.push('/fake-call');
+    } else if (id === 'fake-shutdown') {
+      router.push('/fake-shutdown' as any);
     } else if (id === 'share') {
       setLocationShared(p => !p);
     } else if (id === 'trip') {

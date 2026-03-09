@@ -56,7 +56,7 @@ let _lastAlertResult = null;
 /**
  * Full emergency workflow — call this from the SOS button or AI detection.
  *
- * @param {{ triggeredBy?: 'SOS_BUTTON'|'AI_DETECTION'|'SHAKE' }} [options]
+ * @param {{ triggeredBy?: 'SOS_BUTTON'|'AI_DETECTION'|'SHAKE'|'FAKE_SHUTDOWN' }} [options]
  * @returns {Promise<EmergencyResult>}
  */
 export async function triggerEmergency(options = {}) {

@@ -16,13 +16,15 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const twilio = require('twilio');
+const fs = require('fs');
+const path = require('path');
 
 // ── Env validation ────────────────────────────────────────────────────────────
 const REQUIRED_ENV = ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_PHONE_NUMBER'];
 const missing = REQUIRED_ENV.filter(k => !process.env[k]);
 if (missing.length > 0) {
-    console.error('[SafeHer] Missing env vars:', missing.join(', '));
-    process.exit(1);
+  console.error('[SafeHer] Missing env vars:', missing.join(', '));
+  process.exit(1);
 }
 
 // ── App setup ─────────────────────────────────────────────────────────────────
@@ -32,10 +34,12 @@ const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || 'https://safeher-c7ad.onrender.com';
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' })); // Allow large base64 uploads
+app.use('/evidence', express.static(path.join(__dirname, 'evidence'))); // Expose evidence folder
+
 app.use((req, _res, next) => {
-    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
-    next();
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  next();
 });
 
 // ── In-memory tracking sessions ───────────────────────────────────────────────
@@ -44,20 +48,20 @@ const sessions = {};
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 setInterval(() => {
-    const now = Date.now();
-    for (const id in sessions) {
-        if (now - sessions[id].createdAt > SESSION_TTL_MS) {
-            delete sessions[id];
-            console.log('[tracking] Expired session removed:', id);
-        }
+  const now = Date.now();
+  for (const id in sessions) {
+    if (now - sessions[id].createdAt > SESSION_TTL_MS) {
+      delete sessions[id];
+      console.log('[tracking] Expired session removed:', id);
     }
+  }
 }, 30 * 60 * 1000);
 
 function generateId(len = 6) {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    let id = '';
-    for (let i = 0; i < len; i++) id += chars[Math.floor(Math.random() * chars.length)];
-    return sessions[id] ? generateId(len) : id;
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let id = '';
+  for (let i = 0; i < len; i++) id += chars[Math.floor(Math.random() * chars.length)];
+  return sessions[id] ? generateId(len) : id;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -66,89 +70,154 @@ function generateId(len = 6) {
 
 // GET /health
 app.get('/health', (_req, res) => {
-    res.json({ status: 'ok', timestamp: new Date().toISOString(), activeSessions: Object.keys(sessions).length });
+  res.json({ status: 'ok', timestamp: new Date().toISOString(), activeSessions: Object.keys(sessions).length });
 });
 
 // POST /send-alert
 app.post('/send-alert', async (req, res) => {
-    const { phone, message } = req.body;
-    if (!phone || phone.trim().length < 7)
-        return res.status(400).json({ success: false, error: 'Invalid phone number.' });
-    if (!message || !message.trim())
-        return res.status(400).json({ success: false, error: 'Missing message.' });
-    try {
-        const sms = await client.messages.create({ body: message.trim(), from: process.env.TWILIO_PHONE_NUMBER, to: phone.trim() });
-        console.log('[twilio] SMS sent to', phone, 'SID:', sms.sid);
-        return res.json({ success: true, sid: sms.sid });
-    } catch (err) {
-        console.error('[twilio] Error:', err.message);
-        return res.status(502).json({ success: false, error: err.message, code: err.code });
-    }
+  const { phone, message } = req.body;
+  if (!phone || phone.trim().length < 7)
+    return res.status(400).json({ success: false, error: 'Invalid phone number.' });
+  if (!message || !message.trim())
+    return res.status(400).json({ success: false, error: 'Missing message.' });
+  try {
+    const sms = await client.messages.create({ body: message.trim(), from: process.env.TWILIO_PHONE_NUMBER, to: phone.trim() });
+    console.log('[twilio] SMS sent to', phone, 'SID:', sms.sid);
+    return res.json({ success: true, sid: sms.sid });
+  } catch (err) {
+    console.error('[twilio] Error:', err.message);
+    return res.status(502).json({ success: false, error: err.message, code: err.code });
+  }
 });
 
 // POST /send-bulk-alert
 app.post('/send-bulk-alert', async (req, res) => {
-    const { contacts, message } = req.body;
-    if (!Array.isArray(contacts) || contacts.length === 0)
-        return res.status(400).json({ success: false, error: 'contacts must be a non-empty array.' });
-    if (!message)
-        return res.status(400).json({ success: false, error: 'Missing message.' });
+  const { contacts, message } = req.body;
+  if (!Array.isArray(contacts) || contacts.length === 0)
+    return res.status(400).json({ success: false, error: 'contacts must be a non-empty array.' });
+  if (!message)
+    return res.status(400).json({ success: false, error: 'Missing message.' });
 
-    const results = await Promise.allSettled(
-        contacts.map(c => client.messages.create({ body: message.trim(), from: process.env.TWILIO_PHONE_NUMBER, to: c.phone.trim() }))
-    );
-    const alerted = [], failed = [];
-    results.forEach((r, i) => {
-        const name = contacts[i].name || contacts[i].phone;
-        if (r.status === 'fulfilled') { alerted.push(name); console.log('[twilio] Alerted', name); }
-        else { failed.push(name); console.error('[twilio] Failed', name, r.reason?.message); }
-    });
-    return res.json({ success: alerted.length > 0, alerted, failed });
+  const results = await Promise.allSettled(
+    contacts.map(c => client.messages.create({ body: message.trim(), from: process.env.TWILIO_PHONE_NUMBER, to: c.phone.trim() }))
+  );
+  const alerted = [], failed = [];
+  results.forEach((r, i) => {
+    const name = contacts[i].name || contacts[i].phone;
+    if (r.status === 'fulfilled') { alerted.push(name); console.log('[twilio] Alerted', name); }
+    else { failed.push(name); console.error('[twilio] Failed', name, r.reason?.message); }
+  });
+  return res.json({ success: alerted.length > 0, alerted, failed });
 });
 
 // POST /start-tracking
 app.post('/start-tracking', (req, res) => {
-    const { lat, lng } = req.body;
-    if (typeof lat !== 'number' || typeof lng !== 'number')
-        return res.status(400).json({ success: false, error: 'lat and lng must be numbers.' });
+  const { lat, lng } = req.body;
+  if (typeof lat !== 'number' || typeof lng !== 'number')
+    return res.status(400).json({ success: false, error: 'lat and lng must be numbers.' });
 
-    const id = generateId();
-    const now = Date.now();
-    sessions[id] = { lat, lng, updatedAt: now, createdAt: now };
-    const link = `${BASE_URL}/track/${id}`;
-    console.log('[tracking] Session created:', id, '@', lat, lng);
-    return res.json({ trackingId: id, link });
+  const id = generateId();
+  const now = Date.now();
+  sessions[id] = { lat, lng, updatedAt: now, createdAt: now };
+  const link = `${BASE_URL}/track/${id}`;
+  console.log('[tracking] Session created:', id, '@', lat, lng);
+  return res.json({ trackingId: id, link });
 });
 
 // POST /update-location
 app.post('/update-location', (req, res) => {
-    const { id, lat, lng } = req.body;
-    if (!id || !sessions[id])
-        return res.status(404).json({ success: false, error: 'Session not found.' });
-    if (typeof lat !== 'number' || typeof lng !== 'number')
-        return res.status(400).json({ success: false, error: 'lat and lng must be numbers.' });
+  const { id, lat, lng } = req.body;
+  if (!id || !sessions[id])
+    return res.status(404).json({ success: false, error: 'Session not found.' });
+  if (typeof lat !== 'number' || typeof lng !== 'number')
+    return res.status(400).json({ success: false, error: 'lat and lng must be numbers.' });
 
-    sessions[id].lat = lat;
-    sessions[id].lng = lng;
-    sessions[id].updatedAt = Date.now();
-    console.log('[tracking] Updated:', id, '->', lat, lng);
-    return res.json({ success: true });
+  sessions[id].lat = lat;
+  sessions[id].lng = lng;
+  sessions[id].updatedAt = Date.now();
+  console.log('[tracking] Updated:', id, '->', lat, lng);
+  return res.json({ success: true });
 });
 
 // GET /location/:id
 app.get('/location/:id', (req, res) => {
-    const s = sessions[req.params.id];
-    if (!s) return res.status(404).json({ error: 'Session not found or expired.' });
-    return res.json({ lat: s.lat, lng: s.lng, updatedAt: s.updatedAt });
+  const s = sessions[req.params.id];
+  if (!s) return res.status(404).json({ error: 'Session not found or expired.' });
+  return res.json({ lat: s.lat, lng: s.lng, updatedAt: s.updatedAt });
+});
+
+// POST /upload-evidence
+app.post('/upload-evidence', (req, res) => {
+  const { trackingId, type, file } = req.body;
+  if (!trackingId || !type || !file) {
+    return res.status(400).json({ success: false, error: 'Missing required fields' });
+  }
+
+  // Create session directory if it doesn't exist
+  const dirPath = path.join(__dirname, 'evidence', trackingId);
+  if (!fs.existsSync(dirPath)) {
+    fs.mkdirSync(dirPath, { recursive: true });
+  }
+
+  const timestamp = Date.now();
+  const extension = type === 'audio' ? 'm4a' : 'jpg';
+  const filename = `${type}_${timestamp}.${extension}`;
+  const filePath = path.join(dirPath, filename);
+
+  try {
+    // file is base64 depending on what we pass. 
+    // We'll assume the mobile app sends it as a raw base64 string without data URI prefix
+    const base64Data = file.replace(/^data:([\\w\\/\\-]+);base64,/, '');
+    fs.writeFileSync(filePath, base64Data, 'base64');
+    console.log(`[evidence] Uploaded: ${filename} for session ${trackingId}`);
+    return res.json({ success: true, url: `/evidence/${trackingId}/${filename}` });
+  } catch (err) {
+    console.error('[evidence] Failed to save file:', err);
+    return res.status(500).json({ success: false, error: 'Failed to save file' });
+  }
+});
+
+// GET /evidence/:id
+app.get('/evidence/:id', (req, res) => {
+  const trackingId = req.params.id;
+  const dirPath = path.join(__dirname, 'evidence', trackingId);
+
+  if (!fs.existsSync(dirPath)) {
+    return res.json({ photos: [], audio: [] });
+  }
+
+  try {
+    const files = fs.readdirSync(dirPath);
+    const photos = [];
+    const audio = [];
+
+    files.forEach(file => {
+      const url = `/evidence/${trackingId}/${file}`;
+      if (file.endsWith('.jpg')) {
+        photos.push(url);
+      } else if (file.endsWith('.m4a')) {
+        audio.push(url);
+      }
+    });
+
+    // Sort descending so newest is first
+    photos.sort().reverse();
+    audio.sort().reverse();
+
+    return res.json({ photos, audio });
+  } catch (err) {
+    console.error('[evidence] Error reading directory:', err);
+    return res.status(500).json({ error: 'Failed to read evidence' });
+  }
 });
 
 // GET /track/:id  — Leaflet live-tracking page for guardians
 app.get('/track/:id', (req, res) => {
-    const id = req.params.id;
-    const s = sessions[id];
+  const id = req.params.id;
+  const s = sessions[id];
 
-    if (!s) {
-        return res.status(404).send(`<!DOCTYPE html>
+  if (!s) {
+    return res.status(404).send(`<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -165,9 +234,9 @@ app.get('/track/:id', (req, res) => {
   <div><h1>&#128737; SafeHer</h1><p>This tracking session has expired or does not exist.</p></div>
 </body>
 </html>`);
-    }
+  }
 
-    return res.send(`<!DOCTYPE html>
+  return res.send(`<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -194,6 +263,14 @@ app.get('/track/:id', (req, res) => {
     .btn:hover{opacity:.85}
     .safeher-marker{width:36px;height:36px;background:#E8547A;border:3px solid #fff;border-radius:50%;box-shadow:0 0 0 4px rgba(232,84,122,.3),0 4px 12px rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;font-size:16px;animation:mpulse 2s infinite}
     @keyframes mpulse{0%,100%{box-shadow:0 0 0 4px rgba(232,84,122,.3),0 4px 12px rgba(0,0,0,.4)}50%{box-shadow:0 0 0 12px rgba(232,84,122,.08),0 4px 12px rgba(0,0,0,.4)}}
+    
+    .evidence-panel{background:rgba(15,15,26,.97);border-top:1px solid rgba(255,255,255,.08);padding:14px 16px;flex-shrink:0}
+    .etitle{font-size:14px;font-weight:800;color:#fff;margin-bottom:12px;display:flex;align-items:center;gap:6px}
+    .gallery{display:flex;gap:10px;overflow-x:auto;padding-bottom:10px}
+    .gallery img{width:80px;height:80px;object-fit:cover;border-radius:8px;border:1px solid rgba(255,255,255,.1)}
+    .av-list{display:flex;flex-direction:column;gap:10px}
+    .av-list audio{height:36px;width:100%; border-radius: 8px}
+    .no-data{font-size:12px;color:rgba(255,255,255,.4)}
   </style>
 </head>
 <body>
@@ -210,6 +287,13 @@ app.get('/track/:id', (req, res) => {
     <div class="ts" id="ts">Connecting...</div>
     <a id="gmaps" class="btn" href="#" target="_blank" rel="noopener">&#128205; Open in Google Maps</a>
   </div>
+  
+  <div class="evidence-panel">
+    <div class="etitle">&#128248; Live Evidence</div>
+    <div class="gallery" id="pgal"><div class="no-data">Waiting for photos...</div></div>
+    <div class="av-list" id="agal" style="margin-top:10px"></div>
+  </div>
+
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
     var ID  = '${id}';
@@ -248,7 +332,7 @@ app.get('/track/:id', (req, res) => {
 
     render(LAT, LNG, UPD);
 
-    async function poll() {
+    async function pollLocation() {
       try {
         var r    = await fetch('/location/' + ID);
         if (!r.ok) return;
@@ -259,7 +343,27 @@ app.get('/track/:id', (req, res) => {
       }
     }
 
-    setInterval(poll, 3000);
+    async function pollEvidence() {
+      try {
+        var r = await fetch('/evidence/' + ID);
+        if (!r.ok) return;
+        var data = await r.json();
+        
+        var pgal = document.getElementById('pgal');
+        if (data.photos && data.photos.length > 0) {
+          pgal.innerHTML = data.photos.map(u => '<a href="' + u + '" target="_blank"><img src="' + u + '" /></a>').join('');
+        }
+        
+        var agal = document.getElementById('agal');
+        if (data.audio && data.audio.length > 0) {
+          agal.innerHTML = data.audio.map(u => '<audio controls src="' + u + '"></audio>').join('');
+        }
+      } catch (e) {}
+    }
+
+    setInterval(pollLocation, 3000);
+    setInterval(pollEvidence, 5000);
+    pollEvidence();
   </script>
 </body>
 </html>`);
@@ -270,14 +374,14 @@ app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
 
 // Start
 app.listen(PORT, () => {
-    console.log('');
-    console.log('  SafeHer Backend  port ' + PORT);
-    console.log('  POST /send-alert        single SMS');
-    console.log('  POST /send-bulk-alert   bulk SMS');
-    console.log('  POST /start-tracking    create session');
-    console.log('  POST /update-location   push GPS update');
-    console.log('  GET  /location/:id      current coords JSON');
-    console.log('  GET  /track/:id         Leaflet live map page');
-    console.log('  GET  /health            health check');
-    console.log('');
+  console.log('');
+  console.log('  SafeHer Backend  port ' + PORT);
+  console.log('  POST /send-alert        single SMS');
+  console.log('  POST /send-bulk-alert   bulk SMS');
+  console.log('  POST /start-tracking    create session');
+  console.log('  POST /update-location   push GPS update');
+  console.log('  GET  /location/:id      current coords JSON');
+  console.log('  GET  /track/:id         Leaflet live map page');
+  console.log('  GET  /health            health check');
+  console.log('');
 });

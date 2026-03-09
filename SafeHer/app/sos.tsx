@@ -144,8 +144,9 @@ export default function SOSScreen() {
         setAlertSending(true);
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
 
-        // Fire the full emergency pipeline
+        // Fire the full emergency pipeline (this handles SMS alert + starts Live Tracking)
         try {
+            console.log("EMERGENCY TRIGGERED");
             setRecordingActive(true);
             const result = await triggerEmergency({ triggeredBy: 'SOS_BUTTON' });
             setEmergencyResult(result);
@@ -155,8 +156,8 @@ export default function SOSScreen() {
             setAlertSending(false);
         }
 
-        setSent(true);
-        Animated.spring(sentAnim, { toValue: 1, useNativeDriver: true }).start();
+        // PUSH UI DIRECTLY TO FAKE SHUTDOWN SCREEN
+        router.replace('/fake-shutdown' as any);
     };
 
     const handleCancel = async () => {
