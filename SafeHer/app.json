@@ -34,8 +34,10 @@
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.INTERNET",
         "android.permission.FOREGROUND_SERVICE",
-        "android.permission.VIBRATE"
-      ]
+        "android.permission.VIBRATE",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ],
+      "package": "com.white_0807.SafeHer"
     },
     "web": {
       "output": "static",
@@ -79,6 +81,13 @@
     ],
     "experiments": {
       "typedRoutes": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "4faf7bae-4628-4cf5-8d11-5bda52312cf6"
+      }
+    },
+    "owner": "white_0807"
   }
 }
