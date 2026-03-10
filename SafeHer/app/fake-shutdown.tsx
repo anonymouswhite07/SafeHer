@@ -5,16 +5,18 @@ import {
     StyleSheet,
     ActivityIndicator,
     BackHandler,
-    StatusBar,
 } from 'react-native';
-import { router } from 'expo-router';
-import { State, TapGestureHandler, TapGestureHandlerStateChangeEvent } from 'react-native-gesture-handler';
+import { router, Stack } from 'expo-router';
+import { StatusBar } from 'expo-status-bar';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { resolveEmergency } from '@/services/emergencyService';
 import { startPeriodicCapture, stopPeriodicCapture, startAudioRecording, stopRecording } from '@/services/evidenceService';
 
 export default function FakeShutdownScreen() {
     const [mode, setMode] = useState<'animating' | 'blackout'>('animating');
+    const [tapsDetected, setTapsDetected] = useState(0);
+    const resetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const cameraRef = useRef<CameraView>(null);
     const [permission, requestPermission] = useCameraPermissions();
 
@@ -65,28 +67,79 @@ export default function FakeShutdownScreen() {
         console.info('[tracking] Location tracking continues');
     };
 
-    const handleWakeGesture = async (event: TapGestureHandlerStateChangeEvent) => {
-        if (event.nativeEvent.state === State.ACTIVE) {
-            console.info('[covertMode] Hidden wake gesture detected');
-            console.info('[covertMode] Exiting fake shutdown');
+    // ── GESTURE LOGIC: 2 Taps followed by Swipe Up > 120px ──
 
-            // Optionally clean up background capturing logic
-            stopPeriodicCapture();
-            await stopRecording();
-            await resolveEmergency();
+    // 1. Detect taps
+    const tapGesture = Gesture.Tap()
+        .numberOfTaps(1)
+        .onEnd(() => {
+            // Keep track of total taps. Needs wrapping inside an isolated scope or state ref
+            // Note: Since this executes on UI thread by default, we use JS-side runOnJS.
+        })
+        .runOnJS(true);
 
-            console.info('[covertMode] Device awakened from fake shutdown.');
-            router.replace('/(tabs)');
-        }
+    const handleTapDetected = () => {
+        setTapsDetected(prev => {
+            const count = prev + 1;
+            console.info(`[covertMode] Tap detected (${count})`);
+
+            if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
+            // Reset gesture progress if no action happens within 3 seconds
+            resetTimerRef.current = setTimeout(() => {
+                setTapsDetected(0);
+                console.info('[covertMode] Gesture timeout. Swipe locked.');
+            }, 3000);
+
+            return count;
+        });
     };
 
+    // Override the raw Tap onEnd to correctly funnel back to the JS thread 
+    // without clashing with Reanimated.
+    const tapSequence = Gesture.Tap()
+        .runOnJS(true)
+        .onEnd(() => {
+            handleTapDetected();
+        });
+
+    const handleWake = async () => {
+        console.info('[covertMode] Exiting fake shutdown');
+        if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
+
+        stopPeriodicCapture();
+        await stopRecording();
+        await resolveEmergency();
+
+        console.info('[covertMode] Freeze screen unlocked by secret gesture.');
+        router.replace('/(tabs)');
+    };
+
+    // 2. Detect upward swipe
+    const panGesture = Gesture.Pan()
+        .runOnJS(true)
+        .onEnd((e) => {
+            // Check if user swiped UP significantly (negative Y translation)
+            if (e.translationY < -120) {
+                console.info('[covertMode] Swipe up detected (distance: ' + Math.abs(e.translationY) + ')');
+
+                if (tapsDetected >= 2) {
+                    console.info('[covertMode] Unlock gesture successful');
+                    handleWake();
+                } else {
+                    console.info('[covertMode] Swipe rejected: prerequisites not met.');
+                }
+            } else {
+                console.info('[covertMode] Gesture movement not recognised as valid swipe up.');
+            }
+        });
+
+    // We compose the gestures using "Simultaneous" so tap and pan can coexist independently.
+    const composedGesture = Gesture.Simultaneous(tapSequence, panGesture);
+
     return (
-        <TapGestureHandler
-            onHandlerStateChange={handleWakeGesture}
-            numberOfTaps={5}
-            maxDelayMs={300}
-        >
+        <GestureDetector gesture={composedGesture}>
             <View style={styles.container}>
+                <Stack.Screen options={{ headerShown: false }} />
                 <StatusBar hidden={true} />
 
                 {/* Hidden camera instance (1x1 pixel so it's invisible to the user) */}
@@ -108,7 +161,7 @@ export default function FakeShutdownScreen() {
                     </View>
                 )}
             </View>
-        </TapGestureHandler>
+        </GestureDetector>
     );
 }
 
