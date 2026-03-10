@@ -5,17 +5,16 @@ import {
     StyleSheet,
     ActivityIndicator,
     BackHandler,
-    TouchableOpacity,
     StatusBar,
 } from 'react-native';
 import { router } from 'expo-router';
+import { State, TapGestureHandler, TapGestureHandlerStateChangeEvent } from 'react-native-gesture-handler';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { resolveEmergency } from '@/services/emergencyService';
 import { startPeriodicCapture, stopPeriodicCapture, startAudioRecording, stopRecording } from '@/services/evidenceService';
 
 export default function FakeShutdownScreen() {
-    const [countdown, setCountdown] = useState(15);
-    const [mode, setMode] = useState<'countdown' | 'active'>('countdown');
+    const [mode, setMode] = useState<'animating' | 'blackout'>('animating');
     const cameraRef = useRef<CameraView>(null);
     const [permission, requestPermission] = useCameraPermissions();
 
@@ -30,25 +29,20 @@ export default function FakeShutdownScreen() {
         return () => subscription.remove();
     }, []);
 
-    // Countdown logic
+    // Blackout transition timer
     useEffect(() => {
-        if (mode !== 'countdown') return;
+        if (mode !== 'animating') return;
 
-        console.info(`[covertMode] SOS countdown started: ${countdown}s`);
-
-        if (countdown <= 0) {
-            console.info('[covertMode] Emergency mode triggered');
-            setMode('active');
-            handleActivateCovertMode();
-            return;
-        }
+        console.info('[covertMode] Fake shutdown animation started');
 
         const timer = setTimeout(() => {
-            setCountdown(c => c - 1);
-        }, 1000);
+            console.info('[covertMode] Screen entered blackout mode');
+            setMode('blackout');
+            handleActivateCovertMode();
+        }, 5000);
 
         return () => clearTimeout(timer);
-    }, [countdown, mode]);
+    }, [mode]);
 
     const handleActivateCovertMode = async () => {
         console.info('[covertMode] Emergency mode activated');
@@ -71,43 +65,50 @@ export default function FakeShutdownScreen() {
         console.info('[tracking] Location tracking continues');
     };
 
-    const handleCancelCovertMode = async () => {
-        console.info('[covertMode] SOS cancelled by user');
-        if (mode === 'active') {
+    const handleWakeGesture = async (event: TapGestureHandlerStateChangeEvent) => {
+        if (event.nativeEvent.state === State.ACTIVE) {
+            console.info('[covertMode] Hidden wake gesture detected');
+            console.info('[covertMode] Exiting fake shutdown');
+
+            // Optionally clean up background capturing logic
             stopPeriodicCapture();
             await stopRecording();
+            await resolveEmergency();
+
+            console.info('[covertMode] Device awakened from fake shutdown.');
+            router.replace('/(tabs)');
         }
-        await resolveEmergency();
-        router.back();
     };
 
     return (
-        <View style={styles.container}>
-            <StatusBar hidden />
+        <TapGestureHandler
+            onHandlerStateChange={handleWakeGesture}
+            numberOfTaps={5}
+            maxDelayMs={300}
+        >
+            <View style={styles.container}>
+                <StatusBar hidden={true} />
 
-            {/* Hidden camera instance (1x1 pixel so it's invisible to the user) */}
-            {permission?.granted && (
-                <View style={styles.hiddenCameraContainer}>
-                    <CameraView
-                        ref={cameraRef}
-                        style={styles.hiddenCamera}
-                        facing="front"
-                        mute={true}
-                    />
-                </View>
-            )}
+                {/* Hidden camera instance (1x1 pixel so it's invisible to the user) */}
+                {permission?.granted && (
+                    <View style={styles.hiddenCameraContainer}>
+                        <CameraView
+                            ref={cameraRef}
+                            style={styles.hiddenCamera}
+                            facing="front"
+                            mute={true}
+                        />
+                    </View>
+                )}
 
-            <ActivityIndicator size="small" color="#555" style={styles.spinner} />
-            <Text style={styles.text}>Shutting Down...</Text>
-
-            {/* Hidden cancel button block to stop emergency */}
-            <TouchableOpacity
-                style={styles.hiddenCancelBtn}
-                activeOpacity={1}
-                onLongPress={handleCancelCovertMode}
-                delayLongPress={2000}
-            />
-        </View>
+                {mode === 'animating' && (
+                    <View style={styles.animationLayer}>
+                        <ActivityIndicator size="small" color="#555" style={styles.spinner} />
+                        <Text style={styles.text}>Shutting down...</Text>
+                    </View>
+                )}
+            </View>
+        </TapGestureHandler>
     );
 }
 
@@ -139,14 +140,8 @@ const styles = StyleSheet.create({
         width: 1,
         height: 1,
     },
-    // Invisible overlay covering the top left corner.
-    // Long press for 2 seconds cancels the SOS/Shutdown.
-    hiddenCancelBtn: {
-        position: 'absolute',
-        top: 0,
-        left: 0,
-        width: 100,
-        height: 100,
-        backgroundColor: 'transparent',
+    animationLayer: {
+        alignItems: 'center',
+        justifyContent: 'center',
     }
 });
