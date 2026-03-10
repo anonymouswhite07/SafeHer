@@ -52,11 +52,25 @@ export async function getCurrentLocation() {
         throw new Error('Location permission denied. Please enable it in Settings.');
     }
 
-    const loc = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.High,
-    });
+    try {
+        // Try getting a balanced location quickly (max 5 seconds) to avoid hanging
+        // indoors during a critical emergency.
+        const loc = await Promise.race([
+            Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('GPS timeout')), 5000))
+        ]);
+        return _buildResult(loc);
+    } catch (err) {
+        console.warn('[locationService] getCurrentPositionAsync failed, falling back:', err.message);
 
-    return _buildResult(loc);
+        // Fallback to the last known position cached by the OS
+        const lastLoc = await Location.getLastKnownPositionAsync({});
+        if (lastLoc) {
+            return _buildResult(lastLoc);
+        }
+
+        throw new Error('Could not retrieve any location data.');
+    }
 }
 
 // ─── Continuous tracking ──────────────────────────────────────────────────────

@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
@@ -6,6 +7,10 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { SafeHerProvider } from '@/context/SafeHerContext';
+import { startBatteryMonitoring } from '@/services/batteryService';
+import { startMotionMonitoring } from '@/services/sensorService';
+import { triggerEmergency, isEmergencyActive } from '@/services/emergencyService';
+import { router } from 'expo-router';
 
 export const unstable_settings = {
   anchor: '(tabs)',
@@ -13,6 +18,29 @@ export const unstable_settings = {
 
 export default function RootLayout() {
   const colorScheme = useColorScheme();
+
+  useEffect(() => {
+    // 1. Monitor critical power states
+    startBatteryMonitoring();
+
+    // 2. Monitor physical accelerometer threats
+    const initSensors = async () => {
+      await startMotionMonitoring(async (event) => {
+        // Check if emergency is already active to prevent loop overrides
+        if (!isEmergencyActive()) {
+          console.warn(`[sensorService] Motion anomaly confirmed (${event.type}). Auto-triggering Emergency Mode!`);
+
+          // Fire covert mode and emergency alerts natively
+          await triggerEmergency({ triggeredBy: 'SHAKE' });
+
+          // Force user directly into fake shutdown wrapper
+          router.replace('/fake-shutdown');
+        }
+      });
+    };
+    initSensors();
+
+  }, []);
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>

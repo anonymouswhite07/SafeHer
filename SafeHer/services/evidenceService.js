@@ -17,8 +17,11 @@
 
 import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system/legacy';
+import { isInternetAvailable } from '@/services/networkService';
+import { getTrackingId } from '@/services/trackingService';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
+const BACKEND_URL = 'https://safeher-c7ad.onrender.com';
 
 /** Interval (ms) between automatic photo captures when startPeriodicCapture() is active */
 const PHOTO_INTERVAL_MS = 10_000; // every 10 seconds
@@ -63,6 +66,10 @@ let _photoCount = 0;        // photos captured this session
 let _photoPaths = [];       // absolute paths of saved photos this session
 let _audioUri = null;     // URI of the in-progress/completed audio file
 let _isCapturing = false;    // true while a session is active
+let _isLowBattery = false;   // prevents camera capture when active
+
+let _pendingUploads = [];   // queue of { type, uri } to upload to backend
+let _flushTimer = null;     // interval handling background uploads
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
@@ -145,7 +152,9 @@ export async function capturePhotoEvidence(cameraRef, opts = {}) {
         // Move from temp location to organised session folder
         const filename = `photo_${Date.now()}_${String(_photoCount).padStart(3, '0')}.jpg`;
         const destPath = `${_sessionDir}${filename}`;
-        await FileSystem.moveAsync({ from: photo.uri, to: destPath });
+
+        await _ensureDir(_sessionDir);
+        await FileSystem.copyAsync({ from: photo.uri, to: destPath });
 
         _photoCount++;
         _photoPaths.push(destPath);
@@ -160,6 +169,7 @@ export async function capturePhotoEvidence(cameraRef, opts = {}) {
         };
 
         console.info(`[evidenceService] Photo ${_photoCount} captured: ${destPath}`);
+        _queueUpload('photo', destPath);
         return result;
     } catch (err) {
         console.warn('[evidenceService] capturePhotoEvidence error:', err.message);
@@ -175,6 +185,11 @@ export async function capturePhotoEvidence(cameraRef, opts = {}) {
  * @param {(result: PhotoResult|null) => void} [onCapture]  — called after each capture
  */
 export function startPeriodicCapture(cameraRef, onCapture) {
+    if (_isLowBattery) {
+        console.warn('[evidenceService] Low battery mode active — camera capture disabled.');
+        return;
+    }
+
     stopPeriodicCapture(); // clear any existing timer
 
     _photoTimer = setInterval(async () => {
@@ -197,6 +212,17 @@ export function stopPeriodicCapture() {
         clearInterval(_photoTimer);
         _photoTimer = null;
         console.info('[evidenceService] Periodic photo capture stopped.');
+    }
+}
+
+/**
+ * Configure evidence capture based on battery state.
+ */
+export function setLowBatteryCapture(isLow) {
+    if (_isLowBattery === isLow) return;
+    _isLowBattery = isLow;
+    if (isLow) {
+        stopPeriodicCapture();
     }
 }
 
@@ -239,6 +265,18 @@ export async function stopRecording() {
         ` Audio: ${session.audioUri ?? 'none'} | Photos: ${session.photoCount}`
     );
 
+    if (session.audioUri) {
+        _queueUpload('audio', session.audioUri);
+    }
+
+    // Attempt one last flush before going inactive
+    await _attemptFlushUploads();
+
+    if (_flushTimer) {
+        clearInterval(_flushTimer);
+        _flushTimer = null;
+    }
+
     return session;
 }
 
@@ -268,17 +306,33 @@ export function getSessionStatus() {
 }
 
 /**
- * List all past evidence session directories in the base folder.
- * Useful for a future "Evidence Vault" screen.
- *
- * @returns {Promise<string[]>}  array of session directory URIs
+ * List all past evidence sessions stored locally in the cache directory.
+ * @returns {Promise<Array<{ sessionId: string, sessionDir: string, photos: string[], audio: string[] }>>}
  */
 export async function listEvidenceSessions() {
     try {
         const info = await FileSystem.getInfoAsync(EVIDENCE_BASE_DIR);
         if (!info.exists) return [];
-        const { directories } = await FileSystem.readDirectoryAsync(EVIDENCE_BASE_DIR);
-        return (directories ?? []).map(d => `${EVIDENCE_BASE_DIR}${d}/`);
+
+        const sessions = await FileSystem.readDirectoryAsync(EVIDENCE_BASE_DIR);
+        const result = [];
+
+        for (const sessionId of sessions) {
+            const sessionDir = `${EVIDENCE_BASE_DIR}${sessionId}/`;
+            const files = await FileSystem.readDirectoryAsync(sessionDir).catch(() => []);
+
+            const photos = files.filter(f => f.endsWith('.jpg')).map(f => `${sessionDir}${f}`);
+            const audio = files.filter(f => f.endsWith('.m4a')).map(f => `${sessionDir}${f}`);
+
+            result.push({
+                sessionId,
+                sessionDir,
+                photos,
+                audio,
+            });
+        }
+
+        return result;
     } catch (err) {
         console.warn('[evidenceService] listEvidenceSessions error:', err.message);
         return [];
@@ -323,6 +377,20 @@ async function _ensureSessionDir() {
 
     await FileSystem.makeDirectoryAsync(_sessionDir, { intermediates: true });
     console.info('[evidenceService] Session directory created:', _sessionDir);
+
+    if (!_flushTimer) {
+        _flushTimer = setInterval(_attemptFlushUploads, 5000);
+    }
+}
+
+/**
+ * Safely ensure a directory exists, creating it if necessary.
+ */
+async function _ensureDir(dir) {
+    const info = await FileSystem.getInfoAsync(dir);
+    if (!info.exists) {
+        await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
+    }
 }
 
 /**
@@ -337,10 +405,71 @@ async function _safeStopRecording(recording) {
         if (status.isRecording) {
             await recording.stopAndUnloadAsync();
         }
-        return recording.getURI();
+        const uri = recording.getURI();
+
+        if (uri && _sessionDir) {
+            const dest = `${_sessionDir}audio_${Date.now()}.m4a`;
+            await _ensureDir(_sessionDir);
+            await FileSystem.copyAsync({ from: uri, to: dest });
+            return dest;
+        }
+
+        return uri;
     } catch (err) {
         console.warn('[evidenceService] _safeStopRecording error:', err.message);
         return null;
+    }
+}
+
+/**
+ * Queue a local file for backend upload to attach to the live tracking page.
+ */
+function _queueUpload(type, uri) {
+    if (!uri) return;
+    _pendingUploads.push({ type, uri });
+    _attemptFlushUploads();
+}
+
+/**
+ * Attempt to upload any pending evidence to the backend if internet and tracking are active.
+ */
+let _isFlushing = false;
+async function _attemptFlushUploads() {
+    if (_isFlushing || _pendingUploads.length === 0) return;
+    _isFlushing = true;
+
+    try {
+        const trackingId = getTrackingId();
+        const online = await isInternetAvailable();
+
+        // Cannot upload if offline or if tracking session hasn't been established yet
+        if (!online || !trackingId) return;
+
+        // Take snapshot of queue
+        const queue = [..._pendingUploads];
+        _pendingUploads = [];
+
+        for (const item of queue) {
+            try {
+                const base64 = await FileSystem.readAsStringAsync(item.uri, { encoding: FileSystem.EncodingType.Base64 });
+                const res = await fetch(`${BACKEND_URL}/upload-evidence`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ trackingId, type: item.type, file: base64 }),
+                });
+
+                if (res.ok) {
+                    console.info(`[evidenceService] ✅ Uploaded ${item.type} evidence to tracking session.`);
+                } else {
+                    throw new Error('Server rejected');
+                }
+            } catch (err) {
+                console.warn(`[evidenceService] ⚠️ Failed to upload ${item.type}, re-queuing.`);
+                _pendingUploads.push(item); // Needs retry later
+            }
+        }
+    } finally {
+        _isFlushing = false;
     }
 }
 
@@ -375,3 +504,5 @@ async function _safeStopRecording(recording) {
  * @property {string[]}     photoPaths
  * @property {string|null}  sessionDir
  */
+
+// End of file

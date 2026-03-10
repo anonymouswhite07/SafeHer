@@ -401,6 +401,16 @@ export default function SettingsScreen() {
                     }
                 />
 
+                {/* Evidence */}
+                <Text style={[styles.sectionLabel, { color: theme.textSecondary }]}>EVIDENCE</Text>
+                <SettingRow
+                    icon="folder.fill"
+                    label="Evidence Vault"
+                    desc="View photos and audio from past emergencies"
+                    color={Colors.primary}
+                    onPress={() => router.push('/evidence-vault' as any)}
+                />
+
                 {/* About */}
                 <Text style={[styles.sectionLabel, { color: theme.textSecondary }]}>ABOUT</Text>
                 <SettingRow

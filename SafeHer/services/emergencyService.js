@@ -147,7 +147,7 @@ export async function triggerEmergency(options = {}) {
  * @returns {Promise<AlertSendResult>}
  */
 export async function sendEmergencyAlert({ contacts, mapsLink, escalationLevel = 0, triggeredBy = 'SOS_BUTTON' }) {
-    const message = _buildAlertMessage(mapsLink, escalationLevel);
+    const message = _buildAlertMessage(mapsLink, escalationLevel, triggeredBy);
 
     console.info('[emergencyService] Alert message:\n', message);
 
@@ -300,7 +300,16 @@ async function _sendViaDeviceSMS(contacts, message) {
 
 // ─── Message builder ──────────────────────────────────────────────────────────
 
-function _buildAlertMessage(mapsLink, escalationLevel = 0) {
+function _buildAlertMessage(mapsLink, escalationLevel = 0, triggeredBy = 'SOS_BUTTON') {
+    if (triggeredBy === 'CRITICAL_BATTERY') {
+        return (
+            `🚨 SafeHer Critical Battery Alert\n\n` +
+            `User battery is critically low.\n\n` +
+            `Last known location:\n${mapsLink}\n\n` +
+            `Please check immediately.`
+        );
+    }
+
     if (escalationLevel === 0) {
         return (
             `🚨 Emergency Alert from SafeHer.\n` +

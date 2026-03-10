@@ -19,7 +19,9 @@ import * as Location from 'expo-location';
 
 const BACKEND_URL = 'https://safeher-c7ad.onrender.com';
 const HEARTBEAT_MS = 10_000;  // push at least every 10s even when stationary
+const LOW_BATTERY_HEARTBEAT_MS = 30_000; // extend heartbeat to 30s
 const DISTANCE_METERS = 1;       // fire watcher on any movement ≥ 1 metre
+const LOW_BATTERY_DISTANCE = 10; // fire only on ≥ 10 metre movement
 
 // ── Module state ──────────────────────────────────────────────────────────────
 
@@ -30,6 +32,7 @@ let _watchSubscription = null;   // expo-location subscription object
 let _heartbeatTimer = null;   // interval for stationary keep-alive
 let _lastLat = null;
 let _lastLng = null;
+let _isLowBattery = false;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -71,12 +74,25 @@ export async function startTracking(lat, lng) {
     }
 
     // ── Step 2: watchPositionAsync — primary event-driven updates ──────────
+    await _startLocationWatcher();
+
+    // ── Step 3: Heartbeat — keeps session alive when stationary ───────────
+    _startHeartbeat();
+
+    return { trackingId: _trackingId, link: _trackingLink };
+}
+
+async function _startLocationWatcher() {
+    if (_watchSubscription) {
+        _watchSubscription.remove();
+        _watchSubscription = null;
+    }
     try {
         _watchSubscription = await Location.watchPositionAsync(
             {
-                accuracy: Location.Accuracy.BestForNavigation,
-                distanceInterval: DISTANCE_METERS,   // fire on ≥ 1m movement
-                timeInterval: 3000,              // also fire at least every 3s
+                accuracy: _isLowBattery ? Location.Accuracy.Balanced : Location.Accuracy.BestForNavigation,
+                distanceInterval: _isLowBattery ? LOW_BATTERY_DISTANCE : DISTANCE_METERS,
+                timeInterval: _isLowBattery ? 30000 : 3000,
             },
             (location) => {
                 const { latitude, longitude } = location.coords;
@@ -89,17 +105,17 @@ export async function startTracking(lat, lng) {
     } catch (err) {
         console.warn('[tracking] watchPositionAsync failed, heartbeat-only mode:', err.message);
     }
+}
 
-    // ── Step 3: Heartbeat — keeps session alive when stationary ───────────
+function _startHeartbeat() {
+    if (_heartbeatTimer) clearInterval(_heartbeatTimer);
     _heartbeatTimer = setInterval(async () => {
         if (!_isActive || _lastLat === null) return;
-        // Only push if watcher isn't firing (i.e. user is stationary)
-        // Watcher already calls _pushUpdate, so this is just a keep-alive.
         await _pushUpdate(_lastLat, _lastLng);
-    }, HEARTBEAT_MS);
-
-    return { trackingId: _trackingId, link: _trackingLink };
+    }, _isLowBattery ? LOW_BATTERY_HEARTBEAT_MS : HEARTBEAT_MS);
 }
+
+
 
 /**
  * Stop all tracking — removes the location watcher and heartbeat timer.
@@ -130,18 +146,47 @@ export function stopTracking() {
 /** @returns {string|null} */
 export function getTrackingLink() { return _trackingLink; }
 
+/** @returns {string|null} */
+export function getTrackingId() { return _trackingId; }
+
 /** @returns {boolean} */
 export function isTrackingActive() { return _isActive; }
 
+/**
+ * Configure tracking parameters based on battery level.
+ * Called by batteryService.
+ */
+export async function setLowBatteryTracking(isLow) {
+    if (_isLowBattery === isLow) return;
+    _isLowBattery = isLow;
+    if (_isActive) {
+        console.info(`[tracking] Restarting watcher: Low Battery = ${isLow}`);
+        await _startLocationWatcher();
+        _startHeartbeat();
+    }
+}
+
+/**
+ * Perform a final push with the specific battery_critical status before death.
+ */
+export async function transmitFinalLocation() {
+    if (!_isActive || _lastLat === null) return;
+    console.info('[tracking] Transmitting final location heartbeat...');
+    await _pushUpdate(_lastLat, _lastLng, 'battery_critical');
+}
+
 // ── Internal ──────────────────────────────────────────────────────────────────
 
-async function _pushUpdate(lat, lng) {
+async function _pushUpdate(lat, lng, status = null) {
     if (!_trackingId) return;
     try {
+        const payload = { id: _trackingId, lat, lng };
+        if (status) payload.status = status;
+
         await fetch(`${BACKEND_URL}/update-location`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: _trackingId, lat, lng }),
+            body: JSON.stringify(payload),
         });
         console.info(`[tracking] 📍 ${lat.toFixed(5)}, ${lng.toFixed(5)}`);
     } catch (err) {
