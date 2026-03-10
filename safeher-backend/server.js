@@ -126,7 +126,7 @@ app.post('/start-tracking', (req, res) => {
 
 // POST /update-location
 app.post('/update-location', (req, res) => {
-  const { id, lat, lng } = req.body;
+  const { id, lat, lng, status } = req.body;
   if (!id || !sessions[id])
     return res.status(404).json({ success: false, error: 'Session not found.' });
   if (typeof lat !== 'number' || typeof lng !== 'number')
@@ -134,8 +134,15 @@ app.post('/update-location', (req, res) => {
 
   sessions[id].lat = lat;
   sessions[id].lng = lng;
+  if (status) sessions[id].status = status;
   sessions[id].updatedAt = Date.now();
-  console.log('[tracking] Updated:', id, '->', lat, lng);
+
+  if (status === 'battery_critical') {
+    console.log(`[tracking] ⚠️ CRITICAL BATTERY FINAL FIX: ${id} -> ${lat}, ${lng}`);
+  } else {
+    console.log('[tracking] Updated:', id, '->', lat, lng);
+  }
+
   return res.json({ success: true });
 });
 
