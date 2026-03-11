@@ -17,11 +17,12 @@
 
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
+import * as SecureStore from 'expo-secure-store';
 
 const BACKEND_URL = 'https://safeher-c7ad.onrender.com';
 const LOCATION_TASK = 'safeher-location-task';
 
-TaskManager.defineTask(LOCATION_TASK, ({ data, error }) => {
+TaskManager.defineTask(LOCATION_TASK, async ({ data, error }) => {
     if (error) {
         console.error('[tracking] Background TaskManager error:', error.message);
         return;
@@ -32,8 +33,19 @@ TaskManager.defineTask(LOCATION_TASK, ({ data, error }) => {
             const location = locations[0];
             const { latitude, longitude } = location.coords;
 
-            // Internally track states natively without relying on module closure
-            _pushUpdate(latitude, longitude);
+            // Fetch stateless Tracking ID from persistent store
+            const id = await SecureStore.getItemAsync('TRACKING_ID');
+            if (!id) return; // Exit if tracking session not initialized
+
+            // Directly push from background thread
+            try {
+                await fetch(`${BACKEND_URL}/update-location`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id, lat: latitude, lng: longitude }),
+                });
+                console.info(`[tracking:bg] 📍 ${latitude.toFixed(5)}, ${longitude.toFixed(5)}`);
+            } catch (err) {}
         }
     }
 });
@@ -84,6 +96,9 @@ export async function startTracking(lat, lng) {
         _trackingId = data.trackingId;
         _trackingLink = data.link;
         _isActive = true;
+
+        // Bridge tracking ID persistently for TaskManager BG thread to read
+        await SecureStore.setItemAsync('TRACKING_ID', _trackingId);
 
         console.info(`[tracking] ✅ Session: ${_trackingId}`);
         console.info(`[tracking] 🔗 ${_trackingLink}`);
@@ -142,7 +157,7 @@ function _startHeartbeat() {
 /**
  * Stop all tracking — removes the location watcher and heartbeat timer.
  */
-export function stopTracking() {
+export async function stopTracking() {
     _isActive = false;
 
     Location.hasStartedLocationUpdatesAsync(LOCATION_TASK).then((started) => {
@@ -157,6 +172,9 @@ export function stopTracking() {
         _heartbeatTimer = null;
         console.info('[tracking] Heartbeat cleared.');
     }
+
+    // Wipe background thread memory bridge
+    await SecureStore.deleteItemAsync('TRACKING_ID');
 
     _trackingId = null;
     _trackingLink = null;

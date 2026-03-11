@@ -79,7 +79,8 @@
         {
           "microphonePermission": "SafeHer needs microphone access to record audio evidence during an emergency."
         }
-      ]
+      ],
+      "expo-secure-store"
     ],
     "experiments": {
       "typedRoutes": true
