@@ -16,8 +16,27 @@
  */
 
 import * as Location from 'expo-location';
+import * as TaskManager from 'expo-task-manager';
 
 const BACKEND_URL = 'https://safeher-c7ad.onrender.com';
+const LOCATION_TASK = 'safeher-location-task';
+
+TaskManager.defineTask(LOCATION_TASK, ({ data, error }) => {
+    if (error) {
+        console.error('[tracking] Background TaskManager error:', error.message);
+        return;
+    }
+    if (data) {
+        const { locations } = data;
+        if (locations && locations.length > 0) {
+            const location = locations[0];
+            const { latitude, longitude } = location.coords;
+
+            // Internally track states natively without relying on module closure
+            _pushUpdate(latitude, longitude);
+        }
+    }
+});
 const HEARTBEAT_MS = 10_000;  // push at least every 10s even when stationary
 const LOW_BATTERY_HEARTBEAT_MS = 30_000; // extend heartbeat to 30s
 const DISTANCE_METERS = 1;       // fire watcher on any movement ≥ 1 metre
@@ -83,27 +102,30 @@ export async function startTracking(lat, lng) {
 }
 
 async function _startLocationWatcher() {
-    if (_watchSubscription) {
-        _watchSubscription.remove();
-        _watchSubscription = null;
-    }
     try {
-        _watchSubscription = await Location.watchPositionAsync(
-            {
-                accuracy: _isLowBattery ? Location.Accuracy.Balanced : Location.Accuracy.BestForNavigation,
-                distanceInterval: _isLowBattery ? LOW_BATTERY_DISTANCE : DISTANCE_METERS,
-                timeInterval: _isLowBattery ? 30000 : 3000,
-            },
-            (location) => {
-                const { latitude, longitude } = location.coords;
-                _lastLat = latitude;
-                _lastLng = longitude;
-                _pushUpdate(latitude, longitude);
+        const { status: fgStatus } = await Location.requestForegroundPermissionsAsync();
+        const { status: bgStatus } = await Location.requestBackgroundPermissionsAsync();
+
+        if (fgStatus !== 'granted' || bgStatus !== 'granted') {
+            console.warn('[tracking] Critical OS Location permissions denied.');
+            return;
+        }
+
+        // Native Android OS Task Delegation for offline/locked screen polling
+        await Location.startLocationUpdatesAsync(LOCATION_TASK, {
+            accuracy: _isLowBattery ? Location.Accuracy.Balanced : Location.Accuracy.BestForNavigation,
+            timeInterval: _isLowBattery ? 30000 : 3000,
+            distanceInterval: _isLowBattery ? LOW_BATTERY_DISTANCE : DISTANCE_METERS,
+            showsBackgroundLocationIndicator: true,
+            foregroundService: {
+                notificationTitle: "SafeHer Protection Active",
+                notificationBody: "Monitoring safety sensors and tracking location securely.",
+                notificationColor: "#FF0000"
             }
-        );
-        console.info('[tracking] watchPositionAsync started.');
+        });
+        console.info('[tracking] Background TaskManager watcher bounded');
     } catch (err) {
-        console.warn('[tracking] watchPositionAsync failed, heartbeat-only mode:', err.message);
+        console.warn('[tracking] TaskManager bound failed, heartbeat-only mode:', err.message);
     }
 }
 
@@ -123,11 +145,12 @@ function _startHeartbeat() {
 export function stopTracking() {
     _isActive = false;
 
-    if (_watchSubscription) {
-        _watchSubscription.remove();
-        _watchSubscription = null;
-        console.info('[tracking] Location watcher removed.');
-    }
+    Location.hasStartedLocationUpdatesAsync(LOCATION_TASK).then((started) => {
+        if (started) {
+            Location.stopLocationUpdatesAsync(LOCATION_TASK);
+            console.info('[tracking] TaskManager Location unwired.');
+        }
+    });
 
     if (_heartbeatTimer) {
         clearInterval(_heartbeatTimer);
@@ -179,6 +202,10 @@ export async function transmitFinalLocation() {
 
 async function _pushUpdate(lat, lng, status = null) {
     if (!_trackingId) return;
+
+    _lastLat = lat;
+    _lastLng = lng;
+
     try {
         const payload = { id: _trackingId, lat, lng };
         if (status) payload.status = status;

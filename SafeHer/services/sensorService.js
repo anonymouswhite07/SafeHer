@@ -27,11 +27,14 @@ const UPDATE_INTERVAL_MS = 100;
  * We subtract 1.0 from the raw magnitude to get the "excess" movement.
  */
 const THRESHOLDS = {
-    SHAKE: 2.4,   // violent shaking  — very rapid back-and-forth  (≥ ~23 m/s² net)
-    IMPACT: 3.5,   // sudden hard impact — device hits something hard (≥ ~34 m/s² net)
-    RAPID: 1.5,   // rapid movement   — fast repositioning           (≥ ~15 m/s² net)
+    SHAKE: 4.5,   // violent shaking  — very rapid back-and-forth  (≥ ~45 m/s² net)
+    IMPACT: 5.0,   // sudden hard impact — device hits something hard (≥ ~50 m/s² net)
+    RAPID: 2.5,   // rapid movement   — fast repositioning           (≥ ~25 m/s² net)
     CALM: 0.15,  // below this → device is essentially still
 };
+
+let _shakeCount = 0;
+let _shakeTimer = null;
 
 /**
  * A short-term rolling window of raw magnitudes used for the shake detector.
@@ -171,42 +174,38 @@ function _processSample(raw, thresholds, onEvent) {
         isStill: net < thresholds.CALM,
     };
 
-    // ── 1. Sudden hard impact ─────────────────────────────────────────────────
-    if (net >= thresholds.IMPACT) {
-        _emit(
-            {
-                type: 'IMPACT',
-                severity: 'HIGH',
-                magnitude,
-                net,
-                x, y, z,
-                description: 'Sudden hard impact detected',
-                logMessage: 'Potential danger movement detected — HARD IMPACT (net: ' + net.toFixed(3) + ' G)',
-            },
-            onEvent
-        );
-        return; // impact already the highest priority
-    }
+    // ── 1. Sudden hard impact or Violent shake ──────────────────────────────
+    if (net >= thresholds.SHAKE || net >= thresholds.IMPACT) {
+        _shakeCount++;
+        console.info(`[sensorService] Heavy shock registered. Consecutive strikes: ${_shakeCount}/3`);
 
-    // ── 2. Violent shake ──────────────────────────────────────────────────────
-    if (net >= thresholds.SHAKE) {
-        const reversals = _countReversals();
-        if (reversals >= SHAKE_REVERSAL_MIN) {
+        if (_shakeTimer) clearTimeout(_shakeTimer);
+        _shakeTimer = setTimeout(() => {
+            _shakeCount = 0;
+            console.info('[sensorService] Shock accumulation threshold reset.');
+        }, 2000);
+
+        if (_shakeCount >= 3) {
+            _shakeCount = 0; // consume
+            if (_shakeTimer) {
+                clearTimeout(_shakeTimer);
+                _shakeTimer = null;
+            }
+
             _emit(
                 {
-                    type: 'SHAKE',
+                    type: net >= thresholds.IMPACT ? 'IMPACT' : 'SHAKE',
                     severity: 'HIGH',
                     magnitude,
                     net,
                     x, y, z,
-                    reversals,
-                    description: 'Violent shake pattern detected',
-                    logMessage: 'Potential danger movement detected — VIOLENT SHAKE (reversals: ' + reversals + ', net: ' + net.toFixed(3) + ' G)',
+                    description: 'Sequential violent impacts/shakes detected',
+                    logMessage: 'Danger movement confirmed — MULTIPLE DIRECT HITS (net: ' + net.toFixed(3) + ' G)',
                 },
                 onEvent
             );
-            return;
         }
+        return;
     }
 
     // ── 3. Rapid / abrupt movement ────────────────────────────────────────────
