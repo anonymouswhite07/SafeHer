@@ -21,6 +21,8 @@
 
 import { Platform } from 'react-native';
 import * as SMS from 'expo-sms';
+import * as Battery from 'expo-battery';
+import * as Location from 'expo-location';
 
 import { getCurrentLocation } from '@/services/locationService';
 import { getContacts } from '@/services/contactService';
@@ -121,6 +123,14 @@ export async function triggerEmergency(options = {}) {
         triggeredBy: options.triggeredBy ?? 'SOS_BUTTON',
     });
 
+    // ── Step 4.5: AI Voice Calling Fallback ───────────────────────────────────
+    // Wait 8 seconds. If still in emergency, physically ring guardian phones
+    setTimeout(() => {
+        if (_emergencyActive) {
+            _triggerAICalls(contacts, locationResult, mapsLink, options.triggeredBy ?? 'SOS_BUTTON');
+        }
+    }, 8000);
+
     // ── Step 5: Escalation timer ──────────────────────────────────────────────
     _scheduleEscalation(contacts, mapsLink);
 
@@ -172,6 +182,66 @@ export async function sendEmergencyAlert({ contacts, mapsLink, escalationLevel =
  */
 export async function startEvidenceRecording() {
     return startAudioRecording();
+}
+
+/**
+ * Pushes physical device telemetry through Twilio's text-to-speech call API
+ */
+async function _triggerAICalls(contacts, locationResult, trackingLink, triggeredBy) {
+    if (!contacts || contacts.length === 0) return;
+
+    console.info('[AI Call] Initiating voice sequence...');
+
+    let batteryLevel = 'unknown';
+    try {
+        const lvl = await Battery.getBatteryLevelAsync();
+        if (lvl > 0) batteryLevel = Math.round(lvl * 100) + '%';
+    } catch (e) {}
+
+    let locationName = 'the displayed GPS coordinates';
+    if (locationResult && locationResult.latitude) {
+        try {
+            const geocode = await Location.reverseGeocodeAsync({
+                latitude: locationResult.latitude,
+                longitude: locationResult.longitude
+            });
+            if (geocode && geocode.length > 0) {
+                const place = geocode[0];
+                const area = [place.street, place.city, place.region].filter(Boolean).join(', ');
+                if (area) locationName = area;
+            }
+        } catch (err) {
+            console.warn('[AI Call] Reverse geocoding failed:', err.message);
+        }
+    }
+
+    const statusMap = {
+        'SHAKE': 'moving rapidly or involved in a physical struggle',
+        'IMPACT': 'sensing a severe physical impact or fall',
+        'SOS_BUTTON': 'in active distress',
+        'FAKE_SHUTDOWN': 'currently experiencing a covert threat'
+    };
+    const statusText = statusMap[triggeredBy] || 'in distress';
+
+    for (const contact of contacts) {
+        try {
+            console.info(`[AI Call] Queuing ringing call to ${contact.phone}...`);
+            await fetch(`${BACKEND_URL}/ai-call`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    phone: contact.phone,
+                    userName: 'Jonathan',
+                    location: locationName,
+                    trackingLink: trackingLink || 'unavailable',
+                    status: statusText,
+                    battery: batteryLevel
+                })
+            });
+        } catch (err) {
+            console.warn('[AI Call] Post to backend failed:', err.message);
+        }
+    }
 }
 
 /**

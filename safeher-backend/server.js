@@ -90,6 +90,39 @@ app.post('/send-alert', async (req, res) => {
   }
 });
 
+// POST /ai-call
+app.post('/ai-call', async (req, res) => {
+  const { phone, userName, location, trackingLink, status, battery } = req.body;
+  if (!phone || phone.trim().length < 7)
+    return res.status(400).json({ success: false, error: 'Invalid phone number.' });
+
+  // Generate dynamic message with pauses for clarity
+  const message = `Hello, this is SafeHer A I. ... 
+  ${userName || 'The user'} may be in danger. ... 
+  Current status is ${status || 'unknown'}. ... 
+  Battery level is ${battery || 'unknown'}. ... 
+  Last known location is ${location || 'unknown'}. ... 
+  A live tracking link has been sent to your phone via S M S. ... 
+  Please check immediately.`;
+
+  try {
+    console.log('[AI Call] Generating message');
+    console.log(`[AI Call] Calling guardian at ${phone}`);
+
+    const call = await client.calls.create({
+      to: phone.trim(),
+      from: process.env.TWILIO_PHONE_NUMBER,
+      twiml: `<Response><Say voice="alice">${message}</Say></Response>`
+    });
+
+    console.log('[AI Call] Call successful, SID:', call.sid);
+    return res.json({ success: true, sid: call.sid });
+  } catch (err) {
+    console.error('[AI Call] Error:', err.message);
+    return res.status(502).json({ success: false, error: err.message, code: err.code });
+  }
+});
+
 // POST /send-bulk-alert
 app.post('/send-bulk-alert', async (req, res) => {
   const { contacts, message } = req.body;
