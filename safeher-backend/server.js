@@ -321,8 +321,10 @@ app.get('/track/:id', (req, res) => {
   <div id="map"></div>
   <div class="panel">
     <div class="coords">
-      <div class="cbox"><div class="clabel">Latitude</div><div class="cval" id="dLat">-</div></div>
-      <div class="cbox"><div class="clabel">Longitude</div><div class="cval" id="dLng">-</div></div>
+    <div class="coords">
+      <div class="cbox"><div class="clabel">Distance</div><div class="cval"><span id="distance">--</span> km</div></div>
+      <div class="cbox"><div class="clabel" style="color: #4CAF50">You (Guardian)</div><div class="cval" id="myStatus" style="color: #4CAF50; font-size: 11px; margin-top: 6px">Locating...</div></div>
+    </div>
     </div>
     <div class="ts" id="ts">Connecting...</div>
     <a id="gmaps" class="btn" href="#" target="_blank" rel="noopener">&#128205; Open in Google Maps</a>
@@ -353,6 +355,13 @@ app.get('/track/:id', (req, res) => {
       .openPopup();
     var ring = L.circle([LAT, LNG], { radius: 30, color: '#E8547A', fillColor: '#E8547A', fillOpacity: 0.12, weight: 2 }).addTo(map);
 
+    // Blue Guardian Marker
+    var guardianHtml = '<div style="width:24px;height:24px;background:#4CAF50;border:3px solid #fff;border-radius:50%;box-shadow:0 0 0 2px rgba(76,175,80,.3),0 2px 6px rgba(0,0,0,.4);"></div>';
+    var guardianIcon = L.divIcon({ html: guardianHtml, className: '', iconSize: [24,24], iconAnchor: [12,12] });
+    var guardianMarker = null;
+    var guardianLocation = null;
+    var currentRouteLine = null;
+
     function ago(ts) {
       var s = Math.round((Date.now() - ts) / 1000);
       if (s < 5)  return 'just now';
@@ -360,24 +369,86 @@ app.get('/track/:id', (req, res) => {
       return Math.round(s / 60) + 'm ago';
     }
 
-    function render(lat, lng, ts) {
-      document.getElementById('dLat').textContent = lat.toFixed(6);
-      document.getElementById('dLng').textContent = lng.toFixed(6);
-      document.getElementById('ts').textContent   = 'Last updated: ' + ago(ts);
-      document.getElementById('gmaps').href       = 'https://maps.google.com/?q=' + lat + ',' + lng;
+    // Haversine formula
+    function getDistance(lat1, lng1, lat2, lng2) {
+      const R = 6371; // km
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLng = (lng2 - lng1) * Math.PI / 180;
+      const a = 
+        Math.sin(dLat/2) * Math.sin(dLat/2) +
+        Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+        Math.sin(dLng/2) * Math.sin(dLng/2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+      return (R * c).toFixed(2);
+    }
+
+    async function drawRoute(gLoc, uLoc) {
+      try {
+        const res = await fetch('https://router.project-osrm.org/route/v1/driving/' + gLoc.lng + ',' + gLoc.lat + ';' + uLoc.lng + ',' + uLoc.lat + '?geometries=geojson&overview=full');
+        const data = await res.json();
+        if (data && data.routes && data.routes[0]) {
+          const coordinates = data.routes[0].geometry.coordinates.map(c => [c[1], c[0]]); // Leaflet uses LatLng
+          
+          if (currentRouteLine) map.removeLayer(currentRouteLine);
+          currentRouteLine = L.polyline(coordinates, { color: '#00B0FF', weight: 4, opacity: 0.8, dashArray: '8, 8' }).addTo(map);
+        }
+      } catch(e) {}
+    }
+
+    function renderUser(lat, lng, ts) {
+      document.getElementById('ts').textContent = 'Last updated: ' + ago(ts);
+      document.getElementById('gmaps').href = 'https://maps.google.com/?q=' + lat + ',' + lng;
+      
       marker.setLatLng([lat, lng]);
       ring.setLatLng([lat, lng]);
+
+      // Calculate Mutual Distance if Guardian active
+      if (guardianLocation) {
+        const dist = getDistance(guardianLocation.lat, guardianLocation.lng, lat, lng);
+        document.getElementById('distance').textContent = dist;
+        drawRoute(guardianLocation, { lat, lng });
+      }
+
       map.panTo([lat, lng], { animate: true, duration: 0.8 });
     }
 
-    render(LAT, LNG, UPD);
+    renderUser(LAT, LNG, UPD);
+
+    // Watch Guardian's physical location
+    if (navigator.geolocation) {
+      navigator.geolocation.watchPosition(function(pos) {
+        guardianLocation = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        document.getElementById('myStatus').textContent = 'Live tracking';
+        
+        if (!guardianMarker) {
+          guardianMarker = L.marker([guardianLocation.lat, guardianLocation.lng], { icon: guardianIcon }).addTo(map)
+            .bindPopup("<b>You</b>", { closeButton: false }).openPopup();
+        } else {
+          guardianMarker.setLatLng([guardianLocation.lat, guardianLocation.lng]);
+        }
+
+        // Force distance route sync
+        const dist = getDistance(guardianLocation.lat, guardianLocation.lng, LAT, LNG);
+        document.getElementById('distance').textContent = dist;
+        drawRoute(guardianLocation, { lat: LAT, lng: LNG });
+
+      }, function(err) {
+        document.getElementById('myStatus').textContent = 'Location denied';
+        document.getElementById('distance').textContent = 'Enable GPS';
+        console.error("Guardian GPS denied.");
+      }, { enableHighAccuracy: true });
+    } else {
+      document.getElementById('myStatus').textContent = 'GPS Unavailable';
+    }
 
     async function pollLocation() {
       try {
         var r    = await fetch('/location/' + ID);
         if (!r.ok) return;
         var data = await r.json();
-        render(data.lat, data.lng, data.updatedAt);
+        LAT = data.lat;  // sync globally
+        LNG = data.lng;
+        renderUser(LAT, LNG, data.updatedAt);
       } catch (e) {
         document.getElementById('ts').textContent = 'Reconnecting...';
       }
